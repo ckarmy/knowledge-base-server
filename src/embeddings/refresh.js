@@ -8,8 +8,12 @@ export function chunksFor(text, size = 1200, overlap = 160) {
   if (size < 1 || overlap < 0 || overlap >= size) throw new Error('Invalid chunk bounds');
   const chunks = [];
   for (let start = 0; start < text.length; start += size - overlap) {
-    const end = Math.min(start + size, text.length);
-    chunks.push(text.slice(start, end));
+    let begin = start;
+    let end = Math.min(start + size, text.length);
+    // Preserve complete UTF-16 surrogate pairs at both boundaries.
+    if (begin > 0 && /[\uDC00-\uDFFF]/.test(text[begin]) && /[\uD800-\uDBFF]/.test(text[begin - 1])) begin--;
+    if (end < text.length && /[\uD800-\uDBFF]/.test(text[end - 1]) && /[\uDC00-\uDFFF]/.test(text[end])) end++;
+    chunks.push(text.slice(begin, end));
     if (end === text.length) break;
   }
   return chunks;
@@ -24,9 +28,10 @@ export async function refreshVaultEmbeddings({ db = getDb(), generate = generate
     const hash = createHash('sha256').update(doc.content).digest('hex');
     const parts = chunksFor(doc.content);
     const state = db.prepare('SELECT * FROM vault_embedding_state WHERE document_id = ?').get(doc.id);
-    const count = db.prepare('SELECT count(*) n FROM embeddings WHERE document_id = ?').get(doc.id).n;
+    const stored = db.prepare('SELECT chunk_text FROM embeddings WHERE document_id = ? ORDER BY chunk_index').all(doc.id);
     if (!force && state?.content_hash === hash && state.model === EMBEDDING_VERSION &&
-        state.chunk_count === parts.length && count === parts.length) {
+        state.chunk_count === parts.length && stored.length === parts.length &&
+        stored.every((row, index) => row.chunk_text === parts[index])) {
       result.unchanged++;
       continue;
     }

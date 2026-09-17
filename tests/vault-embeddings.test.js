@@ -64,3 +64,12 @@ test('a concurrent edit cannot publish vectors for obsolete text', async () => {
     assert.equal(db.prepare('SELECT count(*) n FROM embeddings').get().n, 0);
   } finally { db.close(); }
 });
+
+test('Unicode boundaries never split emoji surrogate pairs', () => {
+  for (const text of ['a'.repeat(1199) + '😀' + 'b'.repeat(1500), 'a'.repeat(1039) + '😀' + 'b'.repeat(1500)]) {
+    const chunks = chunksFor(text);
+    assert.ok(chunks.every(x => x.isWellFormed()));
+    assert.ok(chunks.some(x => x.includes('😀')));
+  }
+  assert.ok(chunksFor('😀', 1, 0).every(x => x.isWellFormed()));
+});

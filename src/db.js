@@ -110,6 +110,23 @@ function initSchema(db) {
 
     CREATE INDEX IF NOT EXISTS idx_embeddings_doc ON embeddings(document_id);
     CREATE INDEX IF NOT EXISTS idx_embeddings_vault ON embeddings(vault_path);
+
+    CREATE TABLE IF NOT EXISTS vault_embedding_state (
+      document_id INTEGER PRIMARY KEY REFERENCES documents(id) ON DELETE CASCADE,
+      content_hash TEXT NOT NULL,
+      model TEXT NOT NULL,
+      chunk_count INTEGER NOT NULL
+    );
+
+    CREATE TRIGGER IF NOT EXISTS documents_embeddings_update AFTER UPDATE OF content ON documents
+    WHEN old.content != new.content BEGIN
+      DELETE FROM embeddings WHERE document_id = old.id;
+      DELETE FROM vault_embedding_state WHERE document_id = old.id;
+    END;
+    CREATE TRIGGER IF NOT EXISTS documents_embeddings_delete AFTER DELETE ON documents BEGIN
+      DELETE FROM embeddings WHERE document_id = old.id;
+      DELETE FROM vault_embedding_state WHERE document_id = old.id;
+    END;
   `);
 }
 
@@ -161,9 +178,23 @@ const STOP_WORDS = new Set([
   'which', 'who', 'whom', 'this', 'that', 'these', 'those', 'i', 'me',
   'my', 'we', 'our', 'you', 'your', 'he', 'him', 'his', 'she', 'her',
   'it', 'its', 'they', 'them', 'their', 'about', 'up',
+  'de', 'del', 'la', 'las', 'el', 'los', 'un', 'una', 'unos', 'unas',
+  'en', 'con', 'por', 'para', 'al', 'y', 'o', 'que', 'como', 'cómo',
+  'es', 'son', 'se', 'su', 'sus', 'lo', 'este', 'esta', 'estos', 'estas',
 ]);
 
-export function searchDocuments(query, limit = 20) {
+export function searchDocuments(query, limit = 20, { project, type, db = getDb() } = {}) {
+  const filters = [];
+  const filterParams = [];
+  if (project) {
+    filters.push('EXISTS (SELECT 1 FROM vault_files vf WHERE vf.document_id = d.id AND vf.project = ?)');
+    filterParams.push(project);
+  }
+  if (type) {
+    filters.push('d.doc_type = ?');
+    filterParams.push(type);
+  }
+  const scope = filters.length ? ' AND ' + filters.join(' AND ') : '';
   // Strip punctuation, split into terms, remove stop words
   const terms = query
     .replace(/['"]/g, '')
@@ -177,42 +208,37 @@ export function searchDocuments(query, limit = 20) {
     const fallback = query.replace(/['"]/g, '').split(/\s+/).filter(Boolean);
     if (fallback.length === 0) return [];
     const sanitized = fallback.map(term => `"${term}"`).join(' OR ');
-    const stmt = getDb().prepare(`
+    const stmt = db.prepare(`
       SELECT d.id, d.title,
         snippet(documents_fts, 1, '<mark>', '</mark>', '...', 30) as snippet,
         d.doc_type, d.tags, d.file_size, d.created_at,
         bm25(documents_fts, 10.0, 1.0, 5.0) as rank
       FROM documents_fts f
       JOIN documents d ON d.id = f.rowid
-      WHERE documents_fts MATCH ?
+      WHERE documents_fts MATCH ? ${scope}
       ORDER BY rank
       LIMIT ?
     `);
-    return stmt.all(sanitized, limit);
+    return stmt.all(sanitized, ...filterParams, limit);
   }
 
-  // Build FTS5 query: AND-first for precision, OR fallback for recall
+  // Rank a broad candidate pool: natural-language queries contain words absent from relevant notes.
   // Title-boosted ranking via bm25() weights: title=10x, content=1x, tags=5x
-  const andQuery = terms.map(term => `"${term}" *`).join(' AND ');
   const orQuery = terms.map(term => `"${term}" *`).join(' OR ');
 
-  const stmt = getDb().prepare(`
+  const stmt = db.prepare(`
     SELECT d.id, d.title,
       snippet(documents_fts, 1, '<mark>', '</mark>', '...', 30) as snippet,
       d.doc_type, d.tags, d.file_size, d.created_at,
       bm25(documents_fts, 10.0, 1.0, 5.0) as rank
     FROM documents_fts f
     JOIN documents d ON d.id = f.rowid
-    WHERE documents_fts MATCH ?
+    WHERE documents_fts MATCH ? ${scope}
     ORDER BY rank
     LIMIT ?
   `);
 
-  // Try AND first for precision; fall back to OR if no results
-  let results = stmt.all(andQuery, limit);
-  if (results.length === 0 && terms.length > 1) {
-    results = stmt.all(orQuery, limit);
-  }
+  const results = stmt.all(orQuery, ...filterParams, Math.max(50, limit * 5));
 
   // If OR gives too many low-quality results, re-rank: boost docs matching more terms
   if (terms.length > 1 && results.length > 0) {
@@ -230,7 +256,7 @@ export function searchDocuments(query, limit = 20) {
     results.sort((a, b) => a.rank - b.rank);
   }
 
-  return results;
+  return results.slice(0, limit);
 }
 
 export function listDocuments({ type, tag, limit = 50, offset = 0 } = {}) {

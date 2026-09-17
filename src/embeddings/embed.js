@@ -11,12 +11,13 @@ async function getEmbedder() {
     const { pipeline: createPipeline } = await import('@huggingface/transformers');
 
     // Race model load against a 60s timeout
+    let timer;
     const loaded = await Promise.race([
-      createPipeline('feature-extraction', 'Xenova/all-MiniLM-L6-v2', { quantized: true }),
+      createPipeline('feature-extraction', 'Xenova/all-MiniLM-L6-v2', { dtype: 'fp32' }),
       new Promise((_, reject) =>
-        setTimeout(() => reject(new Error('Embedding model load timed out after 60s')), 60000)
+        { timer = setTimeout(() => reject(new Error('Embedding model load timed out after 60s')), 60000); }
       ),
-    ]);
+    ]).finally(() => clearTimeout(timer));
 
     pipeline = loaded;
     return pipeline;

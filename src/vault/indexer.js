@@ -18,7 +18,8 @@ export function scanVault(vaultPath) {
   function walk(dir) {
     const entries = readdirSync(dir, { withFileTypes: true });
     for (const entry of entries) {
-      if (entry.name.startsWith('.') && IGNORE_DIRS.has(entry.name)) continue;
+      // Hidden folders contain editor state and Syncthing history, not current notes.
+      if (entry.name.startsWith('.')) continue;
       if (IGNORE_DIRS.has(entry.name)) continue;
 
       const fullPath = join(dir, entry.name);
@@ -26,6 +27,7 @@ export function scanVault(vaultPath) {
         walk(fullPath);
       } else if (entry.isFile()) {
         if (IGNORE_FILES.has(entry.name)) continue;
+        if (['AGENTS.MD', 'CLAUDE.MD'].includes(entry.name.toUpperCase())) continue;
         if (entry.name.startsWith('.sync-conflict')) continue;
         if (extname(entry.name).toLowerCase() === '.md') {
           results.push(fullPath);
@@ -62,19 +64,6 @@ async function _indexVault(vaultPath, { embeddings = false } = {}) {
   let deleted = 0;
   let embedded = 0;
   let errors = [];
-
-  // Lazy-load embeddings only if requested
-  let generateEmbedding, embeddingToBuffer;
-  if (embeddings) {
-    try {
-      const embedModule = await import('../embeddings/embed.js');
-      generateEmbedding = embedModule.generateEmbedding;
-      embeddingToBuffer = embedModule.embeddingToBuffer;
-    } catch (err) {
-      errors.push(`embeddings init: ${err.message}`);
-      embeddings = false;
-    }
-  }
 
   for (const filePath of files) {
     const relPath = relative(vaultPath, filePath);
@@ -136,21 +125,6 @@ async function _indexVault(vaultPath, { embeddings = false } = {}) {
         key_topics: parsed.frontmatter.key_topics || null,
       });
 
-      // Generate embedding if enabled
-      if (embeddings && generateEmbedding) {
-        try {
-          const embedding = await generateEmbedding(parsed.body.slice(0, 2000));
-          const buffer = embeddingToBuffer(embedding);
-          getDb().prepare(`
-            INSERT OR REPLACE INTO embeddings (document_id, vault_path, chunk_index, chunk_text, embedding, dimensions)
-            VALUES (?, ?, 0, ?, ?, ?)
-          `).run(docId, relPath, parsed.body.slice(0, 500), buffer, embedding.length);
-          embedded++;
-        } catch (embErr) {
-          errors.push(`embedding ${relPath}: ${embErr.message}`);
-        }
-      }
-
       indexed++;
     } catch (err) {
       errors.push(`${relPath}: ${err.message}`);
@@ -163,6 +137,13 @@ async function _indexVault(vaultPath, { embeddings = false } = {}) {
       deleteVaultFile(path);
       deleted++;
     }
+  }
+
+  if (embeddings) {
+    const { refreshVaultEmbeddings } = await import('../embeddings/refresh.js');
+    const result = await refreshVaultEmbeddings();
+    embedded = result.refreshed;
+    errors.push(...result.errors.map(e => `embedding ${e.path}: ${e.message}`));
   }
 
   return { indexed, skipped, deleted, embedded, errors, total: files.length };

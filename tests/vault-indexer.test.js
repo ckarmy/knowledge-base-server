@@ -12,6 +12,12 @@ describe('scanVault', () => {
     vaultDir = mkdtempSync(join(tmpdir(), 'test-vault-'));
     mkdirSync(join(vaultDir, '05_research'), { recursive: true });
     mkdirSync(join(vaultDir, '.obsidian'), { recursive: true });
+    mkdirSync(join(vaultDir, '.stversions'), { recursive: true });
+    mkdirSync(join(vaultDir, '.custom-backup'), { recursive: true });
+    writeFileSync(join(vaultDir, '.stversions', 'old.md'), 'Old version');
+    writeFileSync(join(vaultDir, '.custom-backup', 'old.md'), 'Old version');
+    writeFileSync(join(vaultDir, 'AGENTS.md'), 'Agent instructions');
+    writeFileSync(join(vaultDir, 'claude.md'), 'Agent instructions');
 
     writeFileSync(join(vaultDir, '05_research', 'test.md'), `---
 title: Test Research
